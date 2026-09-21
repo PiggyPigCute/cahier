@@ -1,0 +1,6 @@
+node_modules/
+__pycache__/
+data/courses/
+data/tmp/
+data/admin-password.json
+data/session-secret

@@ -24,10 +24,14 @@ Format (rétro-ingénierie, Goodnotes 6) :
     taille du fond de page (facteur 6/11 avec les modèles standard).
 """
 import argparse
+import colorsys
+import json
 import math
 import os
 import re
+import shutil
 import struct
+import subprocess
 import sys
 import uuid
 import zipfile
@@ -643,6 +647,47 @@ class PdfSource:
             out.append(stream)
         return b"\n".join(out)
 
+    def looks_like_paper(self):
+        """Vrai si le PDF ne contient ni texte ni image : un simple fond (papier quadrillé...)."""
+        pat = re.compile(rb"/Type\s*/Font\b|/Subtype\s*/Image\b|/Font\b")
+        return not any(pat.search(v) for v, _ in self.objs.values())
+
+    def page_background(self, index=0):
+        """Couleur (r, g, b) du premier remplissage qui couvre toute la page, ou None."""
+        box, _, contents = self.page(index)
+        w, h = box[2] - box[0], box[3] - box[1]
+        color, nums, pts = None, [], []
+        for tok in self.content_bytes(contents).split():
+            if tok[:1] == b"/":
+                continue
+            try:
+                nums.append(float(tok))
+                continue
+            except ValueError:
+                pass
+            op = tok.decode("latin-1")
+            if op in ("cm", "Do", "sh", "BT", "BI"):
+                return None      # transformation ou dessin avant le fond : trop compliqué
+            if op in ("rg", "sc", "scn") and len(nums) >= 3:
+                color = tuple(nums[-3:])
+            elif op == "g" and nums:
+                color = (nums[-1],) * 3
+            elif op in ("m", "l") and len(nums) >= 2:
+                pts.append((nums[-2], nums[-1]))
+            elif op == "re" and len(nums) >= 4:
+                x, y, rw, rh = nums[-4:]
+                pts += [(x, y), (x + rw, y + rh)]
+            elif op in ("f", "F", "f*"):
+                if color and pts:
+                    xs, ys = [p[0] for p in pts], [p[1] for p in pts]
+                    if (max(xs) - min(xs)) >= 0.98 * w and (max(ys) - min(ys)) >= 0.98 * h:
+                        return color
+                pts = []
+            elif op in ("n", "S", "s", "b", "B", "b*", "B*"):
+                pts = []
+            nums = []
+        return None
+
 
 # --------------------------------------------------------------------------- #
 # Écriture du PDF
@@ -789,31 +834,92 @@ def add_image(writer, data):
 DEFAULT_SCALE = 6 / 11           # unités Goodnotes -> points (fonds standard)
 DEFAULT_UNITS = (834.24, 1078.825)   # page A4-ish de la tablette utilisée en exemple
 
+VARIANTS = ("normal", "sans-quadrillage", "blanc")
+VARIANT_FILES = {"normal": "normal.pdf", "sans-quadrillage": "sans-quadrillage.pdf", "blanc": "blanc.pdf"}
+
 
 def pdf_string(s):
-    return "<" + ("﻿" + s).encode("utf-16-be").hex() + ">"
+    return "<" + ("\ufeff" + s).encode("utf-16-be").hex() + ">"
 
 
-def convert(src, dst, background=True, log=print):
+# --------------------------------------------------------------------------- #
+# Couleurs
+# --------------------------------------------------------------------------- #
+
+def hex_color(rgb):
+    return "#%02x%02x%02x" % tuple(max(0, min(255, int(round(v * 255)))) for v in rgb[:3])
+
+
+def parse_hex(h):
+    h = h.strip().lstrip("#")
+    if len(h) == 3:
+        h = "".join(c * 2 for c in h)
+    if not re.fullmatch(r"[0-9a-fA-F]{6}", h):
+        raise ValueError("couleur invalide : %r" % h)
+    return tuple(int(h[i:i + 2], 16) / 255 for i in (0, 2, 4))
+
+
+def _luminance(rgb):
+    def lin(c):
+        return c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4
+    r, g, b = (lin(c) for c in rgb[:3])
+    return 0.2126 * r + 0.7152 * g + 0.0722 * b
+
+
+def contrast_on_white(rgb):
+    return 1.05 / (_luminance(rgb) + 0.05)
+
+
+def suggest_for_white(rgb, highlighter=False):
+    """Couleur de remplacement proposée pour un fond blanc (à ajuster à la main)."""
+    if highlighter or contrast_on_white(rgb) >= 4.5:
+        return tuple(rgb[:3])   # le surligneur est multiplié avec le fond : il reste lisible
+    h, l, sat = colorsys.rgb_to_hls(*rgb[:3])
+    if sat < 0.15:              # blanc ou gris : on inverse la clarté (blanc -> presque noir)
+        return colorsys.hls_to_rgb(h, 1 - l, sat)
+    while l > 0 and contrast_on_white(colorsys.hls_to_rgb(h, l, sat)) < 4.5:
+        l -= 0.01               # couleur vive : même teinte, plus foncée
+    return colorsys.hls_to_rgb(h, max(l, 0), sat)
+
+
+def color_key(rgb, highlighter):
+    return ("hl:" if highlighter else "pen:") + hex_color(rgb)
+
+
+def used_colors(model):
+    """Couleurs des pages 2 et suivantes : [{key, hex, kind, count, suggested}]."""
+    count = Counter()
+    for items, _, _ in model.pages[1:]:
+        for it in items:
+            if it.kind == "stroke":
+                count[color_key(it.color, it.blend)] += 1
+            elif it.kind == "shape":
+                count[color_key(it.fill, False)] += 1
+    out = []
+    for key, n in count.most_common():
+        kind, hx = key.split(":")
+        out.append({"key": key, "hex": hx, "kind": "surligneur" if kind == "hl" else "stylo",
+                    "count": n, "suggested": hex_color(suggest_for_white(parse_hex(hx), kind == "hl"))})
+    return out
+
+
+# --------------------------------------------------------------------------- #
+# Conversion
+# --------------------------------------------------------------------------- #
+
+class Model:
+    """Le document lu : pour chaque page (objets, uuid du fond, taille en unités)."""
+
+    def __init__(self, doc, pages, title):
+        self.doc, self.pages, self.title = doc, pages, title
+
+
+def load_model(src, log=print, title=None):
     def warn(msg):
         log("  attention : " + msg)
 
     doc = Document(src, warn)
-    w = PdfWriter()
-    catalog, pages_root = w.alloc(), w.alloc()
-    gs_alpha = {}
-    templates, images = {}, {}
-    page_objs = []
-
-    def alpha_gs(a, multiply=False):
-        """État graphique (opacité, éventuellement mode Multiply) -> nom de ressource."""
-        key = (round(a, 3), multiply)
-        if key not in gs_alpha:
-            blend = "/BM /Multiply " if multiply else ""
-            gs_alpha[key] = w.add(("<< /Type /ExtGState %s/CA %s /ca %s >>" % (
-                blend, fmt(key[0]), fmt(key[0]))).encode())
-        return "GA%d%s" % (round(key[0] * 1000), "M" if multiply else ""), gs_alpha[key]
-
+    pages = []
     for n, (note_name, attach, size) in enumerate(doc.pages, 1):
         log("page %d/%d" % (n, len(doc.pages)))
         if doc.has(note_name):
@@ -821,31 +927,91 @@ def convert(src, dst, background=True, log=print):
         else:
             items = []
             warn("contenu de la page introuvable (%s)" % note_name)
+        pages.append((items, attach, size))
+    return Model(doc, pages, title or os.path.splitext(os.path.basename(src))[0])
 
-        # fond de page
-        tpl_name = None
+
+class Template:
+    """Fond de page (PDF d'un attachement) : taille, couleur de papier, intégration."""
+
+    def __init__(self, data):
+        self.data = data
+        src = PdfSource(data)
+        self.box = src.page(0)[0]
+        self.paper = None
+        if src.looks_like_paper():
+            try:
+                self.paper = src.page_background(0)
+            except (Unsupported, ValueError, KeyError, IndexError, zlib.error):
+                self.paper = None
+
+
+def render(model, dst, mode="normal", palette=None, background=True, log=print):
+    """Écrit un PDF. mode : normal | sans-quadrillage | blanc (la première page ne change jamais)."""
+    def warn(msg):
+        log("  attention : " + msg)
+
+    doc = model.doc
+    palette = palette or {}
+    w = PdfWriter()
+    catalog, pages_root = w.alloc(), w.alloc()
+    gs_alpha = {}
+    templates, xobjects, images = {}, {}, {}
+    page_objs = []
+
+    def alpha_gs(a, multiply=False):
+        """État graphique (opacité, éventuellement mode Multiply) -> (nom, objet)."""
+        key = (round(a, 3), multiply)
+        if key not in gs_alpha:
+            blend = "/BM /Multiply " if multiply else ""
+            gs_alpha[key] = w.add(("<< /Type /ExtGState %s/CA %s /ca %s >>" % (
+                blend, fmt(key[0]), fmt(key[0]))).encode())
+        return "GA%d%s" % (round(key[0] * 1000), "M" if multiply else ""), gs_alpha[key]
+
+    def template(attach):
+        if attach not in templates:
+            templates[attach] = None
+            if attach and doc.has("attachments/" + attach):
+                try:
+                    templates[attach] = Template(doc.read("attachments/" + attach))
+                except (Unsupported, ValueError, KeyError, IndexError, zlib.error) as e:
+                    warn("fond de page non reproduit (%s)" % e)
+        return templates[attach]
+
+    def recolor(rgb, highlighter):
+        key = color_key(rgb, highlighter)
+        if key in palette:
+            return parse_hex(palette[key])
+        return suggest_for_white(rgb, highlighter)
+
+    for idx, (items, attach, size) in enumerate(model.pages):
+        variant = mode if idx > 0 else "normal"
         pw, ph = (size or DEFAULT_UNITS)
         scale = DEFAULT_SCALE
         page_w, page_h = pw * scale, ph * scale
-        if background and attach and doc.has("attachments/" + attach):
-            if attach not in templates:
-                try:
-                    templates[attach] = w.embed_pdf_page(doc.read("attachments/" + attach))
-                except (Unsupported, ValueError, KeyError, IndexError, zlib.error) as e:
-                    templates[attach] = None
-                    warn("fond de page non reproduit (%s)" % e)
-            if templates[attach]:
-                tpl_name = "T%d" % templates[attach][0]
-                box = templates[attach][1]
-                page_w, page_h = box[2] - box[0], box[3] - box[1]
-                scale = page_w / pw
+        tpl = template(attach) if background else None
         res_x, res_gs = {}, {}
-        if tpl_name:
-            res_x[tpl_name] = templates[attach][0]
-        s = fmt(scale)
         out = []
-        if tpl_name:
-            out.append("/%s Do" % tpl_name)
+        if tpl:
+            box = tpl.box
+            page_w, page_h = box[2] - box[0], box[3] - box[1]
+            scale = page_w / pw
+            if variant != "normal" and tpl.paper:
+                # papier quadrillé/ligné : on garde seulement la couleur de fond (ou du blanc)
+                bg = tpl.paper if variant == "sans-quadrillage" else (1, 1, 1)
+                out.append("%s %s %s rg 0 0 %s %s re f" % (
+                    fmt(bg[0]), fmt(bg[1]), fmt(bg[2]), fmt(page_w), fmt(page_h)))
+            else:
+                if attach not in xobjects:
+                    try:
+                        xobjects[attach] = w.embed_pdf_page(doc.read("attachments/" + attach))[0]
+                    except (Unsupported, ValueError, KeyError, IndexError, zlib.error) as e:
+                        xobjects[attach] = None
+                        warn("fond de page non reproduit (%s)" % e)
+                if xobjects[attach]:
+                    res_x["T%d" % xobjects[attach]] = xobjects[attach]
+                    out.append("/T%d Do" % xobjects[attach])
+        s = fmt(scale)
         for it in items:
             if it.kind == "image":
                 if it.image not in images:
@@ -870,10 +1036,13 @@ def convert(src, dst, background=True, log=print):
             head = "q %s 0 0 -%s %s %s cm" % (s, s, fmt(it.tx * scale), fmt(page_h - it.ty * scale))
             path = path_to_pdf(it.ops, fmt)
             if it.kind == "shape":
+                r, g, b = recolor(it.fill, False) if variant == "blanc" else it.fill[:3]
                 name, res_gs[name] = alpha_gs(it.fill[3])
-                out.append("%s /%s gs %s %s %s rg\n%s\nf Q" % (head, name, *(fmt(v) for v in it.fill[:3]), path))
+                out.append("%s /%s gs %s %s %s rg\n%s\nf Q" % (head, name, fmt(r), fmt(g), fmt(b), path))
                 continue
             r, g, b, a = it.color
+            if variant == "blanc":
+                r, g, b = recolor(it.color, it.blend)
             state = "%s %s %s RG %s w 1 J 1 j" % (fmt(r), fmt(g), fmt(b), fmt(it.width))
             gs = ""
             if it.blend or a < 0.999:  # le surligneur est multiplié avec le fond
@@ -892,9 +1061,55 @@ def convert(src, dst, background=True, log=print):
     w.set(pages_root, ("<< /Type /Pages /Count %d /Kids [%s] >>" % (
         len(page_objs), " ".join("%d 0 R" % p for p in page_objs))).encode())
     w.set(catalog, ("<< /Type /Catalog /Pages %d 0 R >>" % pages_root).encode())
-    title = os.path.splitext(os.path.basename(src))[0]
-    info = w.add(("<< /Title %s /Producer (goodnotes2pdf) >>" % pdf_string(title)).encode())
+    info = w.add(("<< /Title %s /Producer (goodnotes2pdf) >>" % pdf_string(model.title)).encode())
     w.save(dst, catalog, info)
+
+
+def convert(src, dst, background=True, mode="normal", palette=None, log=print, title=None):
+    render(load_model(src, log, title), dst, mode=mode, palette=palette, background=background, log=log)
+
+
+def make_thumbnail(pdf, dst_jpg, log=print):
+    """Vignette JPEG de la première page (nécessite pdftoppm, du paquet poppler-utils)."""
+    exe = shutil.which("pdftoppm")
+    if not exe:
+        log("  attention : pdftoppm introuvable, pas de vignette (paquet poppler-utils)")
+        return False
+    try:
+        subprocess.run([exe, "-jpeg", "-jpegopt", "quality=85", "-f", "1", "-l", "1",
+                        "-scale-to-x", "520", "-scale-to-y", "-1", "-singlefile",
+                        pdf, dst_jpg[:-4]], check=True, timeout=120,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return True
+    except (subprocess.SubprocessError, OSError):
+        log("  attention : la vignette n'a pas pu être créée")
+        return False
+
+
+def build_site(src, outdir, palette=None, only=None, log=print, title=None):
+    """Pour le site : 3 PDF + vignette + info.json (pages, couleurs) dans outdir."""
+    os.makedirs(outdir, exist_ok=True)
+    model = load_model(src, log, title)
+    with open(os.path.join(outdir, "info.json"), "w", encoding="utf-8") as fh:
+        json.dump({"pages": len(model.pages), "colors": used_colors(model)}, fh, ensure_ascii=False)
+    for variant in VARIANTS:
+        if only and variant not in only:
+            continue
+        log("pdf %s" % variant)
+        target = os.path.join(outdir, VARIANT_FILES[variant])
+        render(model, target, mode=variant, palette=palette, log=log)
+        if variant == "normal":
+            make_thumbnail(target, os.path.join(outdir, "thumb.jpg"), log)
+
+
+def load_palette(path):
+    if not path:
+        return {}
+    with open(path, encoding="utf-8") as fh:
+        data = json.load(fh)
+    if not isinstance(data, dict):
+        raise ValueError("la palette doit être un objet JSON {clé: \"#rrggbb\"}")
+    return {str(k): hex_color(parse_hex(str(v))) for k, v in data.items()}
 
 
 def main():
@@ -903,20 +1118,42 @@ def main():
     ap.add_argument("-o", "--sortie", help="PDF de sortie (un seul fichier d'entrée)")
     ap.add_argument("-f", "--forcer", action="store_true", help="écraser un PDF existant")
     ap.add_argument("--sans-fond", action="store_true", help="ne pas reproduire le fond des pages")
+    ap.add_argument("--fond", choices=VARIANTS, default="normal",
+                    help="normal, sans-quadrillage, ou blanc (la 1re page ne change jamais)")
+    ap.add_argument("--palette", help="JSON {\"pen:#rrggbb\": \"#rrggbb\"} : couleurs de remplacement (fond blanc)")
+    ap.add_argument("--couleurs", action="store_true", help="affiche en JSON les couleurs utilisées")
+    ap.add_argument("--site", metavar="DOSSIER",
+                    help="génère normal.pdf, sans-quadrillage.pdf, blanc.pdf, thumb.jpg et info.json (un seul fichier)")
+    ap.add_argument("--seulement", help="avec --site : ne régénérer que ces PDF (ex. blanc)")
+    ap.add_argument("--titre", help="titre inscrit dans le PDF (par défaut : nom du fichier)")
     args = ap.parse_args()
-    if args.sortie and len(args.fichiers) > 1:
-        ap.error("-o ne peut pas être utilisé avec plusieurs fichiers")
+    if (args.sortie or args.site) and len(args.fichiers) > 1:
+        ap.error("-o et --site ne peuvent pas être utilisés avec plusieurs fichiers")
     status = 0
+    try:
+        palette = load_palette(args.palette)
+    except (OSError, ValueError) as e:
+        ap.error("palette : %s" % e)
     for src in args.fichiers:
-        dst = args.sortie or os.path.splitext(src)[0] + ".pdf"
-        if os.path.exists(dst) and not args.forcer:
-            print("%s : %s existe déjà (utiliser -f pour l'écraser ou -o pour un autre nom)" % (src, dst),
-                  file=sys.stderr)
-            status = 1
-            continue
-        print("%s -> %s" % (src, dst))
         try:
-            convert(src, dst, background=not args.sans_fond)
+            if args.couleurs:
+                print(json.dumps(used_colors(load_model(src, lambda m: None)), ensure_ascii=False, indent=1))
+                continue
+            if args.site:
+                only = set(args.seulement.split(",")) if args.seulement else None
+                if only and not only <= set(VARIANTS):
+                    ap.error("--seulement : valeurs possibles %s" % ", ".join(VARIANTS))
+                print("%s -> %s/" % (src, args.site))
+                build_site(src, args.site, palette, only, title=args.titre)
+                continue
+            dst = args.sortie or os.path.splitext(src)[0] + ".pdf"
+            if os.path.exists(dst) and not args.forcer:
+                print("%s : %s existe déjà (utiliser -f pour l'écraser ou -o pour un autre nom)" % (src, dst),
+                      file=sys.stderr)
+                status = 1
+                continue
+            print("%s -> %s" % (src, dst))
+            convert(src, dst, background=not args.sans_fond, mode=args.fond, palette=palette, title=args.titre)
         except (OSError, zipfile.BadZipFile, KeyError, ValueError) as e:
             print("  erreur : %s" % e, file=sys.stderr)
             status = 1

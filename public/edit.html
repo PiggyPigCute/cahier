@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>Poly — édition</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%93%93%3C/text%3E%3C/svg%3E">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Baloo+2:wght@500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+
+<header class="site-header">
+  <div class="container">
+    <h1 class="site-title">Poly<small>Édition</small></h1>
+    <div class="header-actions" id="headerActions" hidden>
+      <a class="btn btn-small" href="/">Voir le site</a>
+      <button class="btn btn-small" id="logoutBtn" type="button">Déconnexion</button>
+    </div>
+  </div>
+</header>
+
+<main class="container">
+
+  <section id="loginView" class="panel login-box" hidden>
+    <form id="loginForm" class="dialog-inner">
+      <div class="field">
+        <label for="password">Mot de passe</label>
+        <input type="password" id="password" required autocomplete="current-password">
+      </div>
+      <button type="submit" class="btn btn-primary">Se connecter</button>
+    </form>
+  </section>
+
+  <section id="mainView" hidden>
+    <div class="dropzone" id="dropzone">
+      <p><strong>Déposez un .goodnotes n'importe où sur cette page</strong> : le cours correspondant à son nom est mis à jour tout de suite.</p>
+      <button type="button" class="btn btn-primary" id="newBtn">＋ Nouveau cours</button>
+    </div>
+    <div class="course-list" id="courseList"></div>
+  </section>
+
+</main>
+
+<!-- sélecteur de fichier partagé : évite de le perdre quand la liste est redessinée pendant la conversion.
+     Pas d'attribut accept : Safari sur iPad grise les extensions inconnues comme .goodnotes -->
+<input type="file" id="filePicker" hidden>
+
+<dialog id="courseDialog">
+  <form id="courseForm">
+    <h2 id="dialogTitle"></h2>
+    <div class="field">
+      <label for="fTitle">Titre</label>
+      <input type="text" id="fTitle" maxlength="120" required>
+    </div>
+    <div class="field">
+      <label for="fDescription">Description</label>
+      <textarea id="fDescription" maxlength="2000"></textarea>
+    </div>
+    <div class="field">
+      <label for="fYear">Année</label>
+      <input type="text" id="fYear" list="yearList" maxlength="20" required autocomplete="off" placeholder="Actuel, M2, M1, L3…">
+      <datalist id="yearList">
+        <option value="Actuel"></option>
+        <option value="M2"></option>
+        <option value="M1"></option>
+        <option value="L3"></option>
+        <option value="L2"></option>
+        <option value="L1"></option>
+      </datalist>
+    </div>
+    <div class="field" id="fileField">
+      <label for="fFile">Fichier .goodnotes</label>
+      <input type="file" id="fFile">
+    </div>
+    <div class="palette" id="paletteBox" hidden>
+      <h3>Couleurs du PDF à fond blanc</h3>
+      <p class="hint">Couleur de remplacement pour chaque couleur utilisée dans le cours (la première page ne change jamais). Le PDF à fond blanc est régénéré à l'enregistrement.</p>
+      <div id="paletteRows"></div>
+    </div>
+    <div class="dialog-actions">
+      <button type="button" class="btn" id="cancelBtn">Annuler</button>
+      <button type="submit" class="btn btn-primary" id="saveBtn">Enregistrer</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="chooserDialog">
+  <div class="dialog-inner">
+    <h2>Quel cours mettre à jour ?</h2>
+    <p class="hint" id="chooserFile" style="margin:0;color:var(--muted)"></p>
+    <div id="chooserList" style="display:flex;flex-direction:column;gap:6px"></div>
+    <div class="dialog-actions">
+      <button type="button" class="btn" id="chooserCancel">Annuler</button>
+      <button type="button" class="btn btn-primary" id="chooserNew">＋ Nouveau cours avec ce fichier</button>
+    </div>
+  </div>
+</dialog>
+
+<div id="toast" role="status"></div>
+
+<script src="/edit.js"></script>
+</body>
+</html>
