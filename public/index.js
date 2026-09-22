@@ -53,7 +53,7 @@
     }
 
     const meta = [];
-    if (course.uploadedAt) meta.push(`Mis à jour le ${dateFormat.format(new Date(course.uploadedAt))}`);
+    if (course.uploadedAt) meta.push(`${dateFormat.format(new Date(course.uploadedAt))}`);
     if (course.pages) meta.push(`${course.pages} page${course.pages > 1 ? 's' : ''}`);
 
     const link = (variant, label, primary) => el(
