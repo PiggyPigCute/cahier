@@ -1,6 +1,7 @@
 (function () {
   const $ = id => document.getElementById(id);
   const dateFormat = new Intl.DateTimeFormat('fr-FR', { day: 'numeric', month: 'long', year: 'numeric', hour: '2-digit', minute: '2-digit' });
+  const VARIANT_LABELS = { normal: 'normal', 'sans-quadrillage': 'sans quadrillage', blanc: 'fond blanc' };
 
   const loginView = $('loginView');
   const mainView = $('mainView');
@@ -161,6 +162,17 @@
         pdfLink(course, 'normal', 'PDF'),
         pdfLink(course, 'sans-quadrillage', 'Sans quadrillage'),
         pdfLink(course, 'blanc', 'Fond blanc')));
+    }
+    if (course.opensTotal > 0) {
+      const detail = Object.entries(course.opens)
+        .filter(([, n]) => n > 0)
+        .map(([variant, n]) => `${n} ${VARIANT_LABELS[variant] || variant}`)
+        .join(', ');
+      info.append(el('p', {
+        class: 'row-opens',
+        title: detail,
+        text: `👁 ${course.opensTotal} ouverture${course.opensTotal > 1 ? 's' : ''}`,
+      }));
     }
 
     const update = el('button', { class: 'btn btn-primary', type: 'button', 'data-action': 'update', text: '⬆ Mettre à jour' });

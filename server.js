@@ -241,6 +241,7 @@ function publicView(m) {
 
 function adminView(m) {
   const job = jobs.get(m.id);
+  const opens = m.opens || {};
   return {
     ...publicView(m),
     sourceName: m.sourceName,
@@ -250,6 +251,8 @@ function adminView(m) {
     progress: job ? job.message : null,
     palette: m.palette || {},
     colors: m.colors || [],
+    opens,
+    opensTotal: Object.values(opens).reduce((sum, n) => sum + n, 0),
   };
 }
 
@@ -480,6 +483,16 @@ function readyCourse(id) {
   return meta && meta.version > 0 ? meta : null;
 }
 
+// compteur d'ouvertures par cours et par variante, juste pour se faire une idée de l'usage du site
+// (pas exposé publiquement, visible uniquement sur /edit) ; pas de déduplication par visiteur, donc un
+// rechargement compte comme une nouvelle ouverture, sauf si le navigateur sert la réponse depuis son
+// cache (ce qui arrive pour une URL déjà ouverte, grâce au cache long permis par ?v=)
+function recordOpen(meta, variant) {
+  meta.opens = meta.opens || {};
+  meta.opens[variant] = (meta.opens[variant] || 0) + 1;
+  saveCourse(meta);
+}
+
 app.get('/pdf/:id/:variant', (req, res) => {
   const meta = readyCourse(req.params.id);
   const file = Object.prototype.hasOwnProperty.call(VARIANT_FILES, req.params.variant)
@@ -488,6 +501,7 @@ app.get('/pdf/:id/:variant', (req, res) => {
   if (!meta || !file || !fs.existsSync(path.join(courseDir(meta.id), file))) {
     return res.status(404).send('Introuvable');
   }
+  recordOpen(meta, req.params.variant);
   const niceName = `${meta.title} - ${VARIANT_LABELS[req.params.variant]}.pdf`;
   res.set('Content-Type', 'application/pdf');
   res.set('Content-Disposition', `inline; filename="cours.pdf"; filename*=UTF-8''${encodeURIComponent(niceName)}`);
@@ -565,6 +579,7 @@ app.post('/edit/api/courses', requireAdmin, upload.single('file'), (req, res) =>
     thumb: false,
     palette: {},
     colors: [],
+    opens: {},
   };
   saveCourse(meta);
   enqueue({ id, kind: 'full', uploadPath: req.file.path, sourceName: meta.sourceName });
