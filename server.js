@@ -63,7 +63,7 @@ function loadAdminPasswordHash() {
 }
 
 const sessionSecret = loadOrCreateSessionSecret();
-const ADMIN_COOKIE = 'poly_admin';
+const ADMIN_COOKIE = 'cahier_admin';
 const SESSION_MAX_AGE_MS = 1000 * 60 * 60 * 24 * 90; // 90 jours : l'édition doit rester à un clic
 
 // stored = "saltHex:hashHex"
@@ -667,7 +667,7 @@ app.use((err, req, res, next) => {
   res.status(400).json({ error: message });
 });
 
-const PORT = process.env.PORT || 3008;
+const PORT = process.env.PORT || 3007;
 app.listen(PORT, () => {
-  console.log(`Poly lancé sur http://localhost:${PORT}`);
+  console.log(`Cahier lancé sur http://localhost:${PORT}`);
 });
