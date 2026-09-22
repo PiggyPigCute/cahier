@@ -484,10 +484,29 @@ function readyCourse(id) {
 }
 
 // compteur d'ouvertures par cours et par variante, juste pour se faire une idée de l'usage du site
-// (pas exposé publiquement, visible uniquement sur /edit) ; pas de déduplication par visiteur, donc un
-// rechargement compte comme une nouvelle ouverture, sauf si le navigateur sert la réponse depuis son
-// cache (ce qui arrive pour une URL déjà ouverte, grâce au cache long permis par ?v=)
-function recordOpen(meta, variant) {
+// (pas exposé publiquement, visible uniquement sur /edit).
+//
+// Un visualiseur de PDF intégré au navigateur (celui de Chrome notamment) ne télécharge pas le
+// fichier en une seule requête : il sonde d'abord le support des requêtes par plage (Range), puis
+// récupère la table des objets et les pages par petits bouts — plusieurs requêtes GET pour une seule
+// ouverture. On déduplique donc les requêtes trop rapprochées pour la même variante et la même IP.
+const OPEN_DEDUPE_MS = 20 * 1000;
+const lastOpenAt = new Map(); // "id:variant:ip" -> timestamp de la dernière requête comptée
+
+setInterval(() => {
+  const cutoff = Date.now() - OPEN_DEDUPE_MS;
+  for (const [key, at] of lastOpenAt) {
+    if (at < cutoff) lastOpenAt.delete(key);
+  }
+}, 10 * 60 * 1000).unref();
+
+function recordOpen(meta, variant, ip) {
+  const key = `${meta.id}:${variant}:${ip}`;
+  const now = Date.now();
+  const last = lastOpenAt.get(key);
+  lastOpenAt.set(key, now);
+  if (last && now - last < OPEN_DEDUPE_MS) return; // requête interne au même visionnage, pas une nouvelle ouverture
+
   meta.opens = meta.opens || {};
   meta.opens[variant] = (meta.opens[variant] || 0) + 1;
   saveCourse(meta);
@@ -501,7 +520,7 @@ app.get('/pdf/:id/:variant', (req, res) => {
   if (!meta || !file || !fs.existsSync(path.join(courseDir(meta.id), file))) {
     return res.status(404).send('Introuvable');
   }
-  recordOpen(meta, req.params.variant);
+  recordOpen(meta, req.params.variant, req.ip);
   const niceName = `${meta.title} - ${VARIANT_LABELS[req.params.variant]}.pdf`;
   res.set('Content-Type', 'application/pdf');
   res.set('Content-Disposition', `inline; filename="cours.pdf"; filename*=UTF-8''${encodeURIComponent(niceName)}`);
