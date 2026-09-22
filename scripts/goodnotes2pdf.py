@@ -454,7 +454,25 @@ class Document:
             tpl = by_note.get(note_id)
             if tpl and tpl in templates:
                 _, _, attach, size = templates[tpl]
-            self.pages.append((path_in_zip, attach, size))
+            self.pages.append([path_in_zip, attach, size])
+
+        # une page insérée sans que Goodnotes journalise l'événement associant son gabarit (ça arrive :
+        # aucun événement ne mentionne alors cette page dans index.events.pb) reprend le gabarit de la
+        # page suivante la plus proche qui en a un (sinon la précédente, pour une dernière page) : la
+        # page 1 sert souvent de couverture avec un gabarit à elle, donc en cas de page manquante juste
+        # après, la suivante est un bien meilleur pari que la couverture
+        missing = [i for i, p in enumerate(self.pages) if p[1] is None]
+        for i in missing:
+            for j in list(range(i + 1, len(self.pages))) + list(range(i - 1, -1, -1)):
+                if self.pages[j][1] is not None:
+                    self.pages[i][1], self.pages[i][2] = self.pages[j][1], self.pages[j][2]
+                    break
+        if missing:
+            label = "la page" if len(missing) == 1 else "les pages"
+            nums = ", ".join("n°%d" % (i + 1) for i in missing)
+            warn("gabarit manquant dans le fichier pour %s %s : celui de la page voisine a été repris"
+                 % (label, nums))
+        self.pages = [tuple(p) for p in self.pages]
 
     def read(self, name):
         return self.zip.read(name)
