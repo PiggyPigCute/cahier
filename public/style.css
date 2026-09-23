@@ -246,6 +246,27 @@ main.container {
   color: var(--muted);
 }
 
+/* --- pied de page --- */
+
+.site-footer {
+  margin-top: 48px;
+  padding: 32px 24px;
+  border-top: 1px solid var(--line);
+  text-align: center;
+}
+
+.footer-credit {
+  margin: 0;
+  font-size: 0.85rem;
+  line-height: 1.7;
+  color: var(--muted);
+}
+
+.footer-credit a {
+  color: inherit;
+  text-decoration: underline;
+}
+
 /* --- édition --- */
 
 .panel {
